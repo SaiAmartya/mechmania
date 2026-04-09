@@ -13,6 +13,8 @@ uint8_t receiverMAC[] = {0x3C, 0x8A, 0x1F, 0xB2, 0x2D, 0x90};
 #define BTN1_PIN    D10   // RAISE
 #define BTN2_PIN    D11   // LOWER
 
+#define POWER LED_BUILTIN // POWER 
+
 typedef struct ControllerData {
   int   joyX;
   int   joyY;
@@ -27,6 +29,8 @@ void setup() {
   Serial.begin(115200);   // Changed to 115200 to match PlatformIO monitor_speed
   pinMode(BTN1_PIN, INPUT_PULLUP);
   pinMode(BTN2_PIN, INPUT_PULLUP);
+  pinMode(POWER, OUTPUT);
+
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
@@ -49,6 +53,8 @@ void setup() {
 }
 
 void loop() {
+  digitalWrite(POWER, HIGH); // Power on the receiver (for testing, can be removed if controller is always powered)
+
   myData.joyX = analogRead(JOY_X_PIN);
   myData.joyY = analogRead(JOY_Y_PIN);
   myData.btn1 = !digitalRead(BTN1_PIN);
