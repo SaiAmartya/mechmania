@@ -4,9 +4,7 @@
 
 // *** REPLACE WITH YOUR RECEIVER ESP32 MAC ADDRESS ***
 // Use the mac_address_finder environment on the receiver to get this MAC address.
-uint8_t receiverMAC[] = {0x3C, 0x8A, 0x1F, 0xB2, 0x2D, 0x90};
-
-// 3C:8A:1F:B2:2D:90
+uint8_t receiverMAC[] = {0x08, 0xA6, 0xF7, 0x64, 0x8F, 0xCC};
 
 #define JOY_X_PIN   A0    // VRX (Safe ADC1 pin)
 #define JOY_Y_PIN   A1    // VRY (Safe ADC1 pin)
