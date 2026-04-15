@@ -7,10 +7,10 @@
 // so you can see exactly which pin/wire is broken.
 //
 // Expected behavior (one second per phase):
-//   1) Left motor spins FORWARD        (GPIO25 → M1A)
-//   2) Left motor spins REVERSE        (GPIO26 → M1B)
-//   3) Right motor spins FORWARD       (GPIO17 → M2A)
-//   4) Right motor spins REVERSE       (GPIO16 → M2B)
+//   1) Left motor spins FORWARD        (GPIO25 → IN1)
+//   2) Left motor spins REVERSE        (GPIO26 → IN2)
+//   3) Right motor spins FORWARD       (GPIO17 → IN1)
+//   4) Right motor spins REVERSE       (GPIO16 → IN2)
 //   5) Brief all-stop, then repeat.
 //
 // Any phase where the corresponding motor does NOT move is the
@@ -18,33 +18,59 @@
 // phase is currently active.
 // ─────────────────────────────────────────────────────────────
 
-#define LEFT_IN1   25   // M1A
-#define LEFT_IN2   26   // M1B
-#define RIGHT_IN1  17   // M2A
-#define RIGHT_IN2  16   // M2B
+#define LEFT_IN1   25   // D2  – direction pin A
+#define LEFT_IN2   26   // D3  – direction pin B
+#define LEFT_ENA   14   // D6  – PWM speed (replaced D4/27 since it doesn't exist)
+
+#define RIGHT_IN1  17   // D10 – direction pin A
+#define RIGHT_IN2  16   // D11 – direction pin B
+#define RIGHT_ENB   4   // D12 – PWM speed (replaced A4 since it's far away)
 
 #define PWM_FREQ   1000
 #define PWM_RES    8
 
-#define CH_L1  0
-#define CH_L2  1
-#define CH_R1  2
-#define CH_R2  3
+#define CH_L  0
+#define CH_R  1
 
 #define PULSE_MS  1000
 #define REST_MS    400
 
 static void allOff() {
-  ledcWrite(CH_L1, 0);
-  ledcWrite(CH_L2, 0);
-  ledcWrite(CH_R1, 0);
-  ledcWrite(CH_R2, 0);
+  digitalWrite(LEFT_IN1, LOW);
+  digitalWrite(LEFT_IN2, LOW);
+  digitalWrite(RIGHT_IN1, LOW);
+  digitalWrite(RIGHT_IN2, LOW);
+  ledcWrite(CH_L, 0);
+  ledcWrite(CH_R, 0);
 }
 
-static void pulse(int channel, const char *label) {
+static void pulseLeft(bool forward, const char *label) {
   Serial.printf(">> %s\n", label);
   allOff();
-  ledcWrite(channel, 255);
+  if (forward) {
+    digitalWrite(LEFT_IN1, HIGH);
+    digitalWrite(LEFT_IN2, LOW);
+  } else {
+    digitalWrite(LEFT_IN1, LOW);
+    digitalWrite(LEFT_IN2, HIGH);
+  }
+  ledcWrite(CH_L, 255);
+  delay(PULSE_MS);
+  allOff();
+  delay(REST_MS);
+}
+
+static void pulseRight(bool forward, const char *label) {
+  Serial.printf(">> %s\n", label);
+  allOff();
+  if (forward) {
+    digitalWrite(RIGHT_IN1, HIGH);
+    digitalWrite(RIGHT_IN2, LOW);
+  } else {
+    digitalWrite(RIGHT_IN1, LOW);
+    digitalWrite(RIGHT_IN2, HIGH);
+  }
+  ledcWrite(CH_R, 255);
   delay(PULSE_MS);
   allOff();
   delay(REST_MS);
@@ -56,17 +82,16 @@ void setup() {
   Serial.println("\n=== Motor pin diagnostic ===");
   Serial.println("Watch which phases fail to spin a motor.");
 
-  ledcSetup(CH_L1, PWM_FREQ, PWM_RES);
-  ledcAttachPin(LEFT_IN1, CH_L1);
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
 
-  ledcSetup(CH_L2, PWM_FREQ, PWM_RES);
-  ledcAttachPin(LEFT_IN2, CH_L2);
+  ledcSetup(CH_L, PWM_FREQ, PWM_RES);
+  ledcAttachPin(LEFT_ENA, CH_L);
 
-  ledcSetup(CH_R1, PWM_FREQ, PWM_RES);
-  ledcAttachPin(RIGHT_IN1, CH_R1);
-
-  ledcSetup(CH_R2, PWM_FREQ, PWM_RES);
-  ledcAttachPin(RIGHT_IN2, CH_R2);
+  ledcSetup(CH_R, PWM_FREQ, PWM_RES);
+  ledcAttachPin(RIGHT_ENB, CH_R);
 
   allOff();
   delay(500);
@@ -74,10 +99,10 @@ void setup() {
 
 void loop() {
   Serial.println("\n--- cycle start ---");
-  pulse(CH_L1, "LEFT  FORWARD  (GPIO25 -> M1A)");
-  pulse(CH_L2, "LEFT  REVERSE  (GPIO26 -> M1B)");
-  pulse(CH_R1, "RIGHT FORWARD  (GPIO17 -> M2A)");
-  pulse(CH_R2, "RIGHT REVERSE  (GPIO16 -> M2B)");
+  pulseLeft(true,  "LEFT  FORWARD  (IN1=H, IN2=L, ENA=PWM)");
+  pulseLeft(false, "LEFT  REVERSE  (IN1=L, IN2=H, ENA=PWM)");
+  pulseRight(true, "RIGHT FORWARD  (IN1=H, IN2=L, ENB=PWM)");
+  pulseRight(false,"RIGHT REVERSE  (IN1=L, IN2=H, ENB=PWM)");
 
   Serial.println("--- idle 2s ---");
   allOff();
