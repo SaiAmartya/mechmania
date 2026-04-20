@@ -5,15 +5,15 @@
 // This runs on the RECEIVER ESP32
 
 // ── Motor Driver Pins (L298N / similar H-bridge) ──────────────
-// Left motor (using contiguous/nearby pins on the board's top edge)
+// Left motor
 #define LEFT_IN1   25   // D2  – direction pin A
 #define LEFT_IN2   26   // D3  – direction pin B
 #define LEFT_ENA   14   // D6  – PWM speed 
 
-// Right motor (using contiguous pins on the board's bottom edge)
+// Right motor
 #define RIGHT_IN1  17   // D10 – direction pin A
 #define RIGHT_IN2  16   // D11 – direction pin B
-#define RIGHT_ENB   4   // D12 – PWM speed (replaced A4 since it's far away)
+#define RIGHT_ENB   4   // D12 – PWM speed
 
 // If a motor spins the wrong way, swap its IN1/IN2 defines above.
 
