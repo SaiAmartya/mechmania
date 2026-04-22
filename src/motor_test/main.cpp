@@ -22,8 +22,8 @@
 #define LEFT_IN2   26   // D3  – direction pin B
 #define LEFT_ENA   14   // D6  – PWM speed (replaced D4/27 since it doesn't exist)
 
-#define RIGHT_IN1  17   // D10 – direction pin A
-#define RIGHT_IN2  16   // D11 – direction pin B
+#define RIGHT_IN1  16   // D10 – direction pin A
+#define RIGHT_IN2  17   // D11 – direction pin B
 #define RIGHT_ENB   4   // D12 – PWM speed (replaced A4 since it's far away)
 
 #define PWM_FREQ   1000
