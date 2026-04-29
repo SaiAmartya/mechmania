@@ -10,8 +10,8 @@ uint8_t receiverMAC[] = {0x3C, 0x8A, 0x1F, 0xB2, 0x55, 0x88};
 
 #define JOY_X_PIN   A0    // VRX (Safe ADC1 pin)
 #define JOY_Y_PIN   A1    // VRY (Safe ADC1 pin)
-#define BTN1_PIN    D10   // RAISE
-#define BTN2_PIN    D11   // LOWER
+#define BTN1_PIN    D10   // Single Button
+
 
 #define POWER LED_BUILTIN // POWER 
 
