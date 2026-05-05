@@ -22,6 +22,12 @@
 #define CONVEYOR_IN2  13  // D7 – direction pin B
 #define CONVEYOR_ENA  12  // D13 – PWM speed
 
+// Intake motor (no enable pin — runs at full speed whenever powered)
+#define INTAKE_IN1   0   // direction pin A
+#define INTAKE_IN2   1   // direction pin B
+
+
+
 // If a motor spins the wrong way, swap its IN1/IN2 defines above.
 
 // ── PWM config ────────────────────────────────────────────────
@@ -100,10 +106,28 @@ void setConveyorMotor(int speed) {
   ledcWrite(CONVEYOR_CHANNEL, constrain(speed, 0, 255));
 }
 
+// Intake has no enable pin — direction-only control.
+// reverse=false → forward (default), reverse=true → reversed.
+void setIntakeDirection(bool reverse) {
+  if (reverse) {
+    digitalWrite(INTAKE_IN1, LOW);
+    digitalWrite(INTAKE_IN2, HIGH);
+  } else {
+    digitalWrite(INTAKE_IN1, HIGH);
+    digitalWrite(INTAKE_IN2, LOW);
+  }
+}
+
+void stopIntake() {
+  digitalWrite(INTAKE_IN1, LOW);
+  digitalWrite(INTAKE_IN2, LOW);
+}
+
 void stopMotors() {
   setLeftMotor(0);
   setRightMotor(0);
   setConveyorMotor(0);
+  stopIntake();
 }
 
 // ── ESP-NOW callback ──────────────────────────────────────────
@@ -135,9 +159,12 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   // Button commands
   String btnCmd = "NONE";
   if (incomingData.btn1)      btnCmd = "RAISE";
-  else if (incomingData.btn2) btnCmd = "LOWER";
+  else if (incomingData.btn2) btnCmd = "REVERSE";
 
   setConveyorMotor(incomingData.btn1 ? SPEED_CONVEYOR : 0);
+
+  // Intake runs continuously; btn2 reverses its direction.
+  setIntakeDirection(incomingData.btn2);
 
   // Debug
   String moveCmd = "STOP";
@@ -168,6 +195,8 @@ void setup() {
   pinMode(RIGHT_IN2, OUTPUT);
   pinMode(CONVEYOR_IN1, OUTPUT);
   pinMode(CONVEYOR_IN2, OUTPUT);
+  pinMode(INTAKE_IN1, OUTPUT);
+  pinMode(INTAKE_IN2, OUTPUT);
 
   // PWM on enable pins
   ledcSetup(LEFT_CHANNEL,  PWM_FREQ, PWM_RES);
@@ -193,4 +222,6 @@ void loop() {
     stopMotors();
   }
   delay(10);
+
+  digitalWrite(INTAKE_IN1, HIGH);
 }
