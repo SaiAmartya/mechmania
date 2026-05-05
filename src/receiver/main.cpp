@@ -25,6 +25,7 @@
 // Intake motor (no enable pin — runs at full speed whenever powered)
 #define INTAKE_IN1   0   // direction pin A
 #define INTAKE_IN2   1   // direction pin B
+#define INTAKE_ENA   3   // PWM speed control
 
 
 
@@ -36,6 +37,7 @@
 #define LEFT_CHANNEL   0
 #define RIGHT_CHANNEL  1
 #define CONVEYOR_CHANNEL 2
+#define INTAKE_CHANNEL   3
 
 // ── Speed presets ─────────────────────────────────────────────
 #define SPEED_FULL    250    // mid speed for better control
@@ -105,29 +107,26 @@ void setConveyorMotor(int speed) {
   }
   ledcWrite(CONVEYOR_CHANNEL, constrain(speed, 0, 255));
 }
-
-// Intake has no enable pin — direction-only control.
-// reverse=false → forward (default), reverse=true → reversed.
-void setIntakeDirection(bool reverse) {
-  if (reverse) {
-    digitalWrite(INTAKE_IN1, LOW);
-    digitalWrite(INTAKE_IN2, HIGH);
-  } else {
+void setIntakeMotor(int speed) {
+  if (speed > 0) {
     digitalWrite(INTAKE_IN1, HIGH);
     digitalWrite(INTAKE_IN2, LOW);
+  } else if (speed < 0) {
+    digitalWrite(INTAKE_IN1, LOW);
+    digitalWrite(INTAKE_IN2, HIGH);
+    speed = -speed;
+  } else {
+    digitalWrite(INTAKE_IN1, LOW);
+    digitalWrite(INTAKE_IN2, LOW);
   }
-}
-
-void stopIntake() {
-  digitalWrite(INTAKE_IN1, LOW);
-  digitalWrite(INTAKE_IN2, LOW);
+  ledcWrite(INTAKE_CHANNEL, constrain(speed, 0, 255));
 }
 
 void stopMotors() {
   setLeftMotor(0);
   setRightMotor(0);
   setConveyorMotor(0);
-  stopIntake();
+  setIntakeMotor(0);
 }
 
 // ── ESP-NOW callback ──────────────────────────────────────────
@@ -163,8 +162,8 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
 
   setConveyorMotor(incomingData.btn1 ? SPEED_CONVEYOR : 0);
 
-  // Intake runs continuously; btn2 reverses its direction.
-  setIntakeDirection(incomingData.btn2);
+  // Intake runs continuously at 80% (204/255); btn2 reverses its direction.
+  setIntakeMotor(incomingData.btn2 ? -204 : 204);
 
   // Debug
   String moveCmd = "STOP";
@@ -207,7 +206,10 @@ void setup() {
   ledcAttachPin(CONVEYOR_ENA, CONVEYOR_CHANNEL);
 
   stopMotors();
+  ledcSetup(INTAKE_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcAttachPin(INTAKE_ENA, INTAKE_CHANNEL);
 
+  stopMotors();
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed!");
     return;
@@ -222,6 +224,4 @@ void loop() {
     stopMotors();
   }
   delay(10);
-
-  digitalWrite(INTAKE_IN1, HIGH);
 }
