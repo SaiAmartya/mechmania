@@ -15,12 +15,10 @@
 #define RIGHT_IN2  17   // D11 – direction pin B
 #define RIGHT_ENB   4   // D12 – PWM speed
 
-// ── Motor Driver 2 Pins (L298N / similar H-bridge) ──────────────
-// Conveyor motor
-// Define 3 pins here
-#define CONVEYOR_IN1  2 // D9  – direction pin A
-#define CONVEYOR_IN2  13  // D7 – direction pin B
-#define CONVEYOR_ENA  12  // D13 – PWM speed
+// ── Conveyor: A4988 stepstick (stepper driver) ────────────────
+// Only STEP + DIR are driven from the MCU. See wiring notes at bottom of file.
+#define CONVEYOR_STEP 13   // STEP pulse to A4988 (reused from old conveyor IN2)
+#define CONVEYOR_DIR  2   // DIR to A4988 (NEW pin — wire this)
 
 // Intake motor (no enable pin — runs at full speed whenever powered)
 #define INTAKE_IN1   0   // direction pin A
@@ -36,13 +34,19 @@
 #define PWM_RES        8      // 8-bit → 0-255
 #define LEFT_CHANNEL   0
 #define RIGHT_CHANNEL  1
-#define CONVEYOR_CHANNEL 2
 #define INTAKE_CHANNEL   3
 
 // ── Speed presets ─────────────────────────────────────────────
 #define SPEED_FULL    250    // mid speed for better control
 #define SPEED_TURN    70     // inner-wheel speed on diagonal moves
-#define SPEED_CONVEYOR  150    // moderate conveyor speed
+
+// ── Conveyor stepper config ───────────────────────────────────
+// Step interval = half-period of the STEP square wave. Smaller = faster.
+// 600 µs → ~833 steps/s (~5 rev/s on a 200-step NEMA17 in full-step).
+// Increase if motor stalls, decrease for more speed.
+#define CONVEYOR_STEP_HALF_US  600
+// Direction sign — flip if conveyor runs backwards.
+#define CONVEYOR_DIR_FORWARD   HIGH
 
 // ── Joystick data ─────────────────────────────────────────────
 typedef struct ControllerData {
@@ -93,19 +97,22 @@ void setRightMotor(int speed) {
   ledcWrite(RIGHT_CHANNEL, constrain(speed, 0, 255));
 }
 
-void setConveyorMotor(int speed) {
-  if (speed > 0) {
-    digitalWrite(CONVEYOR_IN1, HIGH);
-    digitalWrite(CONVEYOR_IN2, LOW);
-  } else if (speed < 0) {
-    digitalWrite(CONVEYOR_IN1, LOW);
-    digitalWrite(CONVEYOR_IN2, HIGH);
-    speed = -speed;
+// Conveyor stepper state — driven non-blockingly from loop()
+// 0 = stopped, +1 = forward, -1 = reverse
+volatile int      conveyorRun         = 0;
+volatile bool     conveyorStepLevel   = false;
+volatile uint32_t conveyorLastStepUs  = 0;
+
+void setConveyorStepper(int dir) {
+  conveyorRun = (dir > 0) ? 1 : (dir < 0) ? -1 : 0;
+  if (conveyorRun == 0) {
+    digitalWrite(CONVEYOR_STEP, LOW);
+    conveyorStepLevel = false;
   } else {
-    digitalWrite(CONVEYOR_IN1, LOW);
-    digitalWrite(CONVEYOR_IN2, LOW);
+    digitalWrite(CONVEYOR_DIR,
+                 (conveyorRun > 0) ? CONVEYOR_DIR_FORWARD
+                                   : !CONVEYOR_DIR_FORWARD);
   }
-  ledcWrite(CONVEYOR_CHANNEL, constrain(speed, 0, 255));
 }
 void setIntakeMotor(int speed) {
   if (speed > 0) {
@@ -125,7 +132,7 @@ void setIntakeMotor(int speed) {
 void stopMotors() {
   setLeftMotor(0);
   setRightMotor(0);
-  setConveyorMotor(0);
+  setConveyorStepper(0);
   setIntakeMotor(0);
 }
 
@@ -160,10 +167,11 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (incomingData.btn1)      btnCmd = "RAISE";
   else if (incomingData.btn2) btnCmd = "REVERSE";
 
-  setConveyorMotor(incomingData.btn1 ? SPEED_CONVEYOR : 0);
+  // btn1 runs the conveyor forward; release stops it.
+  setConveyorStepper(incomingData.btn1 ? 1 : 0);
 
-  // Intake runs continuously at 80% (204/255); btn2 reverses its direction.
-  setIntakeMotor(incomingData.btn2 ? -204 : 204);
+  // Intake runs continuously at 100% (255/255); btn2 reverses its direction.
+  setIntakeMotor(incomingData.btn2 ? -255 : 255);
 
   // Debug
   String moveCmd = "STOP";
@@ -192,8 +200,10 @@ void setup() {
   pinMode(LEFT_IN2,  OUTPUT);
   pinMode(RIGHT_IN1, OUTPUT);
   pinMode(RIGHT_IN2, OUTPUT);
-  pinMode(CONVEYOR_IN1, OUTPUT);
-  pinMode(CONVEYOR_IN2, OUTPUT);
+  pinMode(CONVEYOR_STEP, OUTPUT);
+  pinMode(CONVEYOR_DIR,  OUTPUT);
+  digitalWrite(CONVEYOR_STEP, LOW);
+  digitalWrite(CONVEYOR_DIR,  CONVEYOR_DIR_FORWARD);
   pinMode(INTAKE_IN1, OUTPUT);
   pinMode(INTAKE_IN2, OUTPUT);
 
@@ -202,10 +212,6 @@ void setup() {
   ledcAttachPin(LEFT_ENA,  LEFT_CHANNEL);
   ledcSetup(RIGHT_CHANNEL, PWM_FREQ, PWM_RES);
   ledcAttachPin(RIGHT_ENB, RIGHT_CHANNEL);
-  ledcSetup(CONVEYOR_CHANNEL, PWM_FREQ, PWM_RES);
-  ledcAttachPin(CONVEYOR_ENA, CONVEYOR_CHANNEL);
-
-  stopMotors();
   ledcSetup(INTAKE_CHANNEL, PWM_FREQ, PWM_RES);
   ledcAttachPin(INTAKE_ENA, INTAKE_CHANNEL);
 
@@ -223,5 +229,22 @@ void loop() {
   if (lastReceiveTime > 0 && millis() - lastReceiveTime > RECEIVE_TIMEOUT) {
     stopMotors();
   }
-  delay(10);
+
+  Serial.println("Receiver loop running..."); // Debug: confirm loop is active
+  
+  // Serial output ALL raw data
+  Serial.printf("Raw Data | X=%d Y=%d btn1=%d btn2=%d\n",
+                incomingData.joyX, incomingData.joyY,
+                incomingData.btn1, incomingData.btn2);
+
+  // Non-blocking STEP pulse generator for the A4988-driven conveyor.
+  // Toggles CONVEYOR_STEP every CONVEYOR_STEP_HALF_US microseconds while running.
+  if (conveyorRun != 0) {
+    uint32_t now = micros();
+    if ((uint32_t)(now - conveyorLastStepUs) >= CONVEYOR_STEP_HALF_US) {
+      conveyorLastStepUs = now;
+      conveyorStepLevel = !conveyorStepLevel;
+      digitalWrite(CONVEYOR_STEP, conveyorStepLevel ? HIGH : LOW);
+    }
+  }
 }
