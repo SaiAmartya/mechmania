@@ -20,10 +20,12 @@
 #define CONVEYOR_STEP 13   // STEP pulse to A4988 (reused from old conveyor IN2)
 #define CONVEYOR_DIR  2   // DIR to A4988 (NEW pin — wire this)
 
-// Intake motor (no enable pin — runs at full speed whenever powered)
-#define INTAKE_IN1   0   // direction pin A
-#define INTAKE_IN2   1   // direction pin B
-#define INTAKE_ENA   3   // PWM speed control
+// Intake motor
+// NOTE: GPIO 0/1/3 are reserved (boot strap + UART0 TX/RX). Using them as
+// motor pins kills Serial output. Remapped to safe GPIOs — rewire accordingly.
+#define INTAKE_IN1   18  // direction pin A
+#define INTAKE_IN2   19  // direction pin B
+#define INTAKE_ENA   23  // PWM speed control
 
 
 
@@ -52,8 +54,10 @@
 typedef struct ControllerData {
   int   joyX;
   int   joyY;
-  bool  btn1;
-  bool  btn2;
+  bool  btn1;   // conveyor forward
+  bool  btn2;   // conveyor backward
+  bool  btn3;   // intake reverse (only when btn4 enables intake)
+  bool  btn4;   // intake on/off switch
 } ControllerData;
 
 ControllerData incomingData;
@@ -162,16 +166,26 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   setLeftMotor(leftSpeed);
   setRightMotor(rightSpeed);
 
-  // Button commands
+  // Conveyor: btn1 = forward, btn2 = backward.
+  // If both pressed at once, prefer forward and ignore backward (safer than oscillating).
+  int conveyorDir = 0;
+  if      (incomingData.btn1) conveyorDir =  1;
+  else if (incomingData.btn2) conveyorDir = -1;
+  setConveyorStepper(conveyorDir);
+
+  // Intake: btn4 (switch) gates power; btn3 reverses direction while gated on.
+  if (incomingData.btn4) {
+    setIntakeMotor(incomingData.btn3 ? -255 : 255);
+  } else {
+    setIntakeMotor(0);
+  }
+
+  // Debug label for the button state
   String btnCmd = "NONE";
-  if (incomingData.btn1)      btnCmd = "RAISE";
-  else if (incomingData.btn2) btnCmd = "REVERSE";
-
-  // btn1 runs the conveyor forward; release stops it.
-  setConveyorStepper(incomingData.btn1 ? 1 : 0);
-
-  // Intake runs continuously at 100% (255/255); btn2 reverses its direction.
-  setIntakeMotor(incomingData.btn2 ? -255 : 255);
+  if      (conveyorDir > 0)        btnCmd = "CONV-FWD";
+  else if (conveyorDir < 0)        btnCmd = "CONV-REV";
+  else if (incomingData.btn4 && incomingData.btn3) btnCmd = "INTAKE-REV";
+  else if (incomingData.btn4)      btnCmd = "INTAKE-ON";
 
   // Debug
   String moveCmd = "STOP";
@@ -184,20 +198,28 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   else if (turnLeft)                moveCmd = "TURN-LEFT";
   else if (turnRight)               moveCmd = "TURN-RIGHT";
 
-  Serial.printf("%-10s | %-5s | L=%4d R=%4d | X=%d Y=%d\n",
+  Serial.printf("%-10s | %-10s | L=%4d R=%4d | X=%d Y=%d | b1=%d b2=%d b3=%d b4=%d\n",
                 moveCmd.c_str(), btnCmd.c_str(),
                 leftSpeed, rightSpeed,
-                incomingData.joyX, incomingData.joyY);
+                incomingData.joyX, incomingData.joyY,
+                incomingData.btn1, incomingData.btn2,
+                incomingData.btn3, incomingData.btn4);
 }
 
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
+  Serial.println("Receiver starting up...");
   WiFi.mode(WIFI_STA);
+  Serial.println("Test 1");
 
   // Direction pins
   pinMode(LEFT_IN1,  OUTPUT);
+  Serial.println("Test 2");
+
   pinMode(LEFT_IN2,  OUTPUT);
+  Serial.println("Test 3");
+
   pinMode(RIGHT_IN1, OUTPUT);
   pinMode(RIGHT_IN2, OUTPUT);
   pinMode(CONVEYOR_STEP, OUTPUT);
@@ -215,6 +237,8 @@ void setup() {
   ledcSetup(INTAKE_CHANNEL, PWM_FREQ, PWM_RES);
   ledcAttachPin(INTAKE_ENA, INTAKE_CHANNEL);
 
+  Serial.println("Test 4");
+
   stopMotors();
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed!");
@@ -230,12 +254,18 @@ void loop() {
     stopMotors();
   }
 
-  Serial.println("Receiver loop running..."); // Debug: confirm loop is active
-  
-  // Serial output ALL raw data
-  Serial.printf("Raw Data | X=%d Y=%d btn1=%d btn2=%d\n",
-                incomingData.joyX, incomingData.joyY,
-                incomingData.btn1, incomingData.btn2);
+  // Heartbeat: report when no packets are arriving so it's obvious whether
+  // Serial is dead or the controller is silent.
+  static unsigned long lastHeartbeat = 0;
+  if (millis() - lastHeartbeat >= 1000) {
+    lastHeartbeat = millis();
+    if (lastReceiveTime == 0) {
+      Serial.println("No data received yet (waiting for first packet from controller)");
+    } else if (millis() - lastReceiveTime > RECEIVE_TIMEOUT) {
+      Serial.printf("No data received for %lu ms (controller silent / out of range)\n",
+                    millis() - lastReceiveTime);
+    }
+  }
 
   // Non-blocking STEP pulse generator for the A4988-driven conveyor.
   // Toggles CONVEYOR_STEP every CONVEYOR_STEP_HALF_US microseconds while running.
