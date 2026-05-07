@@ -2,7 +2,7 @@
 #include <esp_now.h>
 #include <WiFi.h>
 
-// This runs on the RECEIVER ESP32
+// This runs on the RECEIVER ESP32 - Firebeetle2 DFRobot ESP32e
 
 // ── Motor Driver Pins (L298N / similar H-bridge) ──────────────
 // Left motor
@@ -27,7 +27,13 @@
 #define INTAKE_IN2   19  // direction pin B
 #define INTAKE_ENA   23  // PWM speed control
 
-
+// ── Cherry limit switch (conveyor down-stop) ──────────────────
+// SPDT microswitch wired NO + COM (NO -> GPIO with INPUT_PULLUP, COM -> GND).
+// Reads LOW when the lever is pressed (hook at bottom of travel), HIGH when
+// released. Press blocks the conveyor from moving further "backward" (down);
+// "forward" (up) is always allowed so the hook can leave the switch.
+#define CONVEYOR_LIMIT_PIN     27
+#define CONVEYOR_LIMIT_PRESSED LOW
 
 // If a motor spins the wrong way, swap its IN1/IN2 defines above.
 
@@ -107,7 +113,14 @@ volatile int      conveyorRun         = 0;
 volatile bool     conveyorStepLevel   = false;
 volatile uint32_t conveyorLastStepUs  = 0;
 
+static inline bool conveyorLimitPressed() {
+  return digitalRead(CONVEYOR_LIMIT_PIN) == CONVEYOR_LIMIT_PRESSED;
+}
+
 void setConveyorStepper(int dir) {
+  // Honor the bottom-of-travel limit: block downward motion when pressed.
+  // Upward motion is always allowed so the hook can leave the switch.
+  if (dir < 0 && conveyorLimitPressed()) dir = 0;
   conveyorRun = (dir > 0) ? 1 : (dir < 0) ? -1 : 0;
   if (conveyorRun == 0) {
     digitalWrite(CONVEYOR_STEP, LOW);
@@ -198,9 +211,10 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   else if (turnLeft)                moveCmd = "TURN-LEFT";
   else if (turnRight)               moveCmd = "TURN-RIGHT";
 
-  Serial.printf("%-10s | %-10s | L=%4d R=%4d | X=%d Y=%d | b1=%d b2=%d b3=%d b4=%d\n",
+  Serial.printf("%-10s | %-10s | L=%4d R=%4d | LIM=%d | X=%d Y=%d | b1=%d b2=%d b3=%d b4=%d\n",
                 moveCmd.c_str(), btnCmd.c_str(),
                 leftSpeed, rightSpeed,
+                conveyorLimitPressed() ? 1 : 0,
                 incomingData.joyX, incomingData.joyY,
                 incomingData.btn1, incomingData.btn2,
                 incomingData.btn3, incomingData.btn4);
@@ -226,6 +240,7 @@ void setup() {
   pinMode(CONVEYOR_DIR,  OUTPUT);
   digitalWrite(CONVEYOR_STEP, LOW);
   digitalWrite(CONVEYOR_DIR,  CONVEYOR_DIR_FORWARD);
+  pinMode(CONVEYOR_LIMIT_PIN, INPUT_PULLUP);
   pinMode(INTAKE_IN1, OUTPUT);
   pinMode(INTAKE_IN2, OUTPUT);
 
@@ -265,6 +280,13 @@ void loop() {
       Serial.printf("No data received for %lu ms (controller silent / out of range)\n",
                     millis() - lastReceiveTime);
     }
+  }
+
+  // Stop mid-stroke if the bottom limit trips between ESP-NOW packets.
+  // Without this, the conveyor would keep going down for up to RECEIVE_TIMEOUT
+  // (or until the next packet) after the switch is hit.
+  if (conveyorRun < 0 && conveyorLimitPressed()) {
+    setConveyorStepper(0);
   }
 
   // Non-blocking STEP pulse generator for the A4988-driven conveyor.
