@@ -46,9 +46,34 @@
 #define INTAKE_CHANNEL   3
 
 // ── Speed presets ─────────────────────────────────────────────
-#define SPEED_FULL    250    // mid speed for better control
-#define SPEED_TURN    70     // inner-wheel speed on diagonal moves
-#define CONVEYOR_SPEED 255   // conveyor PWM duty (0-255)
+// Lowered max speed to reduce wheel-spin / improve traction.
+#define SPEED_FULL          210   // outer-wheel / straight-line speed (was 250)
+#define SPEED_TURN           80   // inner-wheel speed on diagonal (arc) moves
+#define SPEED_TURN_INPLACE  160   // (legacy — superseded by the in-place charge curve below)
+#define CONVEYOR_SPEED      255   // conveyor PWM duty (0-255)
+
+// ── In-place turn "hold-to-charge" curve ──────────────────────
+// At a pivot both wheels fight static friction at once, so a fixed PWM gives
+// a sluggish spin. Instead we ramp PWM up the longer the joystick is held in
+// a turn direction:
+//   • brief tap          → INPLACE_PWM_MIN    (gentle nudge)
+//   • held INPLACE_CHARGE_MS → INPLACE_PWM_MAX (snappy spin, can exceed
+//                                                straight-line max because
+//                                                turning load is symmetric)
+// Releasing the stick or switching to a different motion (forward/back/other
+// direction) resets the charge so the next tap starts gentle again.
+#define INPLACE_PWM_MIN       140   // initial PWM on first packet of a turn
+#define INPLACE_PWM_MAX       240   // cap after holding for INPLACE_CHARGE_MS
+#define INPLACE_CHARGE_MS     600   // time from MIN → MAX while held
+
+// ── Acceleration ramp (traction control) ──────────────────────
+// Drive motors ramp from 0 → target along a smoothstep curve (slow start,
+// ease in, ease out) instead of slamming straight to full PWM. This prevents
+// the wheels from breaking traction on the initial push. The ramp is reset
+// whenever the joystick reverses direction or moves from rest, so each new
+// "throw" of the stick gets a fresh controlled acceleration.
+#define RAMP_TIME_MS    170    // time from 0 → full target along the curve
+#define RAMP_UPDATE_MS   10    // how often loop() updates the motor PWM
 
 // ── Joystick data ─────────────────────────────────────────────
 typedef struct ControllerData {
@@ -157,6 +182,82 @@ void stopMotors() {
   setIntakeMotor(0);
 }
 
+// ── Drive motor ramp state ────────────────────────────────────
+// Targets are written by the ESP-NOW callback; the actual PWM applied to
+// each motor is updated in loop() so the ramp runs at a steady rate even if
+// packets arrive late or in bursts.
+struct MotorRamp {
+  int           target;     // most-recent target speed (signed)
+  int           current;    // currently commanded PWM (signed)
+  int           rampSign;   // sign of the active ramp (+1 / -1 / 0)
+  unsigned long startMs;    // millis() when this ramp started
+};
+
+volatile int  driveTargetLeft  = 0;
+volatile int  driveTargetRight = 0;
+// When true, the next ramp tick snaps to the target instead of curving up.
+// Set by the callback for in-place turns — static friction at a pivot is too
+// high for the smooth-launch ramp to overcome without slipping.
+volatile bool driveInstant     = false;
+static MotorRamp leftRamp  = {0, 0, 0, 0};
+static MotorRamp rightRamp = {0, 0, 0, 0};
+
+static inline int signOf(int v) { return (v > 0) - (v < 0); }
+
+// Smoothstep curve: f(t) = 3t² − 2t³ for t in [0,1].
+// Slow start, accelerates through the middle, eases into the target.
+static inline float smoothstep(float t) {
+  if (t <= 0.0f) return 0.0f;
+  if (t >= 1.0f) return 1.0f;
+  return t * t * (3.0f - 2.0f * t);
+}
+
+// Advance one motor's ramp toward `target` and return the PWM to write.
+// On direction change (or restart from rest) the ramp restarts from 0 so the
+// new motion always begins gently.
+static int stepRamp(MotorRamp &r, int target, unsigned long now, bool instant) {
+  int newSign = signOf(target);
+
+  if (newSign != r.rampSign) {
+    // Direction changed (incl. → 0 or 0 → motion). Snap to 0 and restart.
+    r.current  = 0;
+    r.rampSign = newSign;
+    r.startMs  = now;
+  }
+  r.target = target;
+
+  if (target == 0) {
+    r.current = 0;
+    return 0;
+  }
+
+  if (instant) {
+    // Bypass the curve — punch through static friction (used for in-place turns).
+    // Fast-forward startMs so a subsequent non-instant tick continues from full
+    // rather than re-curving up from zero.
+    r.startMs = now - RAMP_TIME_MS;
+    r.current = target;
+    return r.current;
+  }
+
+  unsigned long elapsed = now - r.startMs;
+  float t     = (float)elapsed / (float)RAMP_TIME_MS;
+  float curve = smoothstep(t);
+  int   absT  = abs(target);
+  r.current   = newSign * (int)(absT * curve);
+  return r.current;
+}
+
+static void resetDriveRamps() {
+  driveTargetLeft  = 0;
+  driveTargetRight = 0;
+  driveInstant     = false;
+  leftRamp  = {0, 0, 0, 0};
+  rightRamp = {0, 0, 0, 0};
+  setLeftMotor(0);
+  setRightMotor(0);
+}
+
 // ── ESP-NOW callback ──────────────────────────────────────────
 void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   if (len != sizeof(incomingData)) return;   // ignore malformed packets
@@ -171,17 +272,43 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   int leftSpeed  = 0;
   int rightSpeed = 0;
 
+  // ── In-place turn charge: track how long the stick has been held in
+  // pure left/right and grow PWM along an exponential curve.
+  // 1 - e^(-k·t) saturates at INPLACE_PWM_MAX; k=3 reaches ~95% at full charge.
+  bool inPlaceTurn = (turnLeft || turnRight) && !goForward && !goBackward;
+  static unsigned long inPlaceStartMs = 0;
+  static int           inPlaceDir     = 0;   // -1 left, +1 right, 0 none
+  unsigned long nowCb = millis();
+  int dirNow = inPlaceTurn ? (turnLeft ? -1 : +1) : 0;
+  if (dirNow != inPlaceDir) {
+    inPlaceDir     = dirNow;
+    inPlaceStartMs = nowCb;
+  }
+  int inPlacePwm = 0;
+  if (dirNow != 0) {
+    float t = (float)(nowCb - inPlaceStartMs) / (float)INPLACE_CHARGE_MS;
+    if (t > 1.0f) t = 1.0f;
+    float charge = 1.0f - expf(-3.0f * t);   // exponential saturating curve
+    int range = INPLACE_PWM_MAX - INPLACE_PWM_MIN;
+    inPlacePwm  = INPLACE_PWM_MIN + (int)(range * charge);
+  }
+
   if (goForward && turnLeft)        { leftSpeed =  SPEED_TURN; rightSpeed =  SPEED_FULL; }
   else if (goForward && turnRight)  { leftSpeed =  SPEED_FULL; rightSpeed =  SPEED_TURN; }
   else if (goBackward && turnLeft)  { leftSpeed = -SPEED_TURN; rightSpeed = -SPEED_FULL; }
   else if (goBackward && turnRight) { leftSpeed = -SPEED_FULL; rightSpeed = -SPEED_TURN; }
   else if (goForward)               { leftSpeed =  SPEED_FULL; rightSpeed =  SPEED_FULL; }
   else if (goBackward)              { leftSpeed = -SPEED_FULL; rightSpeed = -SPEED_FULL; }
-  else if (turnLeft)                { leftSpeed = -SPEED_FULL; rightSpeed =  SPEED_FULL; }
-  else if (turnRight)               { leftSpeed =  SPEED_FULL; rightSpeed = -SPEED_FULL; }
+  else if (turnLeft)                { leftSpeed = -inPlacePwm; rightSpeed =  inPlacePwm; }
+  else if (turnRight)               { leftSpeed =  inPlacePwm; rightSpeed = -inPlacePwm; }
 
-  setLeftMotor(leftSpeed);
-  setRightMotor(rightSpeed);
+  // Hand targets to the ramp; loop() drives the actual PWM along a smooth curve.
+  // In-place turn bypasses the smoothstep ramp because the charge curve is
+  // already doing its own (more aggressive) ramp tailored for breaking pivot
+  // friction — letting the smoothstep run on top would attenuate the launch.
+  driveTargetLeft  = leftSpeed;
+  driveTargetRight = rightSpeed;
+  driveInstant     = inPlaceTurn;
 
   // Conveyor mapping (swapped from prior version — buttons were inverted on the controller):
   //   btn2 = manual UP (held, forward)
@@ -299,10 +426,25 @@ void setup() {
 }
 
 void loop() {
+  unsigned long now = millis();
+
   // Kill motors if controller signal is lost
-  if (lastReceiveTime > 0 && millis() - lastReceiveTime > RECEIVE_TIMEOUT) {
+  if (lastReceiveTime > 0 && now - lastReceiveTime > RECEIVE_TIMEOUT) {
     autoDescending = false;
-    stopMotors();
+    resetDriveRamps();
+    setConveyorMotor(0);
+    setIntakeMotor(0);
+  } else {
+    // Advance the drive-motor ramp at a fixed rate so PWM updates are smooth
+    // regardless of ESP-NOW packet jitter.
+    static unsigned long lastRampMs = 0;
+    if (now - lastRampMs >= RAMP_UPDATE_MS) {
+      lastRampMs = now;
+      int l = stepRamp(leftRamp,  driveTargetLeft,  now, driveInstant);
+      int r = stepRamp(rightRamp, driveTargetRight, now, driveInstant);
+      setLeftMotor(l);
+      setRightMotor(r);
+    }
   }
 
   // Heartbeat: report when no packets are arriving so it's obvious whether
