@@ -23,8 +23,8 @@
 // Intake motor
 // NOTE: GPIO 0/1/3 are reserved (boot strap + UART0 TX/RX). Using them as
 // motor pins kills Serial output. Remapped to safe GPIOs — rewire accordingly.
-#define INTAKE_IN1   18  // direction pin A
-#define INTAKE_IN2   19  // direction pin B
+#define INTAKE_IN1   19  // direction pin A
+#define INTAKE_IN2   18  // direction pin B
 #define INTAKE_ENA   23  // PWM speed control
 
 // ── Cherry limit switch (conveyor down-stop) ──────────────────
@@ -81,8 +81,8 @@ typedef struct ControllerData {
   int   joyY;
   bool  btn1;   // conveyor DOWN — one-click toggle (auto-descent until limit)
   bool  btn2;   // conveyor UP   — manual hold (forward)
-  bool  btn3;   // intake reverse (only when btn4 enables intake)
-  bool  btn4;   // intake on/off switch
+  bool  btn3;   // drive front/back invert (swaps joystick forward/backward)
+  bool  btn4;   // intake on/off switch (intake spins one direction only)
 } ControllerData;
 
 ControllerData incomingData;
@@ -138,7 +138,6 @@ volatile int conveyorRun = 0;
 volatile bool autoDescending = false;
 
 static inline bool conveyorLimitPressed() {
-  Serial.println(digitalRead(CONVEYOR_LIMIT_PIN));
   return digitalRead(CONVEYOR_LIMIT_PIN) == CONVEYOR_LIMIT_PRESSED;
 }
 
@@ -264,10 +263,18 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   memcpy(&incomingData, data, sizeof(incomingData));
   lastReceiveTime = millis();
 
-  bool goForward  = (incomingData.joyX > DEAD_HIGH);
-  bool goBackward = (incomingData.joyX < DEAD_LOW);
-  bool turnLeft   = (incomingData.joyY < DEAD_LOW);
-  bool turnRight  = (incomingData.joyY > DEAD_HIGH);
+  // btn3 inverts the robot's "front": the joystick is rotated 180° so both
+  // axes swap. FWD-LEFT ↔ BACK-RIGHT and FWD-RIGHT ↔ BACK-LEFT, which keeps
+  // the stick intuitive when driving with the rear as the leading edge.
+  bool rawForward  = (incomingData.joyX > DEAD_HIGH);
+  bool rawBackward = (incomingData.joyX < DEAD_LOW);
+  bool rawLeft     = (incomingData.joyY < DEAD_LOW);
+  bool rawRight    = (incomingData.joyY > DEAD_HIGH);
+  bool invertFront = incomingData.btn3;
+  bool goForward   = invertFront ? rawBackward : rawForward;
+  bool goBackward  = invertFront ? rawForward  : rawBackward;
+  bool turnLeft    = invertFront ? rawRight    : rawLeft;
+  bool turnRight   = invertFront ? rawLeft     : rawRight;
 
   int leftSpeed  = 0;
   int rightSpeed = 0;
@@ -347,9 +354,10 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   }
   setConveyorMotor(conveyorSpeed);
 
-  // Intake: btn4 (switch) gates power; btn3 reverses direction while gated on.
+  // Intake: btn4 (switch) gates power. Single direction only — btn3 no longer
+  // reverses the intake; it now controls drive front/back inversion above.
   if (incomingData.btn4) {
-    setIntakeMotor(incomingData.btn3 ? -255 : 255);
+    setIntakeMotor(255);
   } else {
     setIntakeMotor(0);
   }
@@ -358,7 +366,6 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   String btnCmd = "NONE";
   if      (conveyorSpeed > 0)      btnCmd = "CONV-FWD";
   else if (conveyorSpeed < 0)      btnCmd = "CONV-REV";
-  else if (incomingData.btn4 && incomingData.btn3) btnCmd = "INTAKE-REV";
   else if (incomingData.btn4)      btnCmd = "INTAKE-ON";
 
   // Debug
