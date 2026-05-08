@@ -54,8 +54,8 @@
 typedef struct ControllerData {
   int   joyX;
   int   joyY;
-  bool  btn1;   // conveyor forward
-  bool  btn2;   // conveyor backward
+  bool  btn1;   // conveyor DOWN — one-click toggle (auto-descent until limit)
+  bool  btn2;   // conveyor UP   — manual hold (forward)
   bool  btn3;   // intake reverse (only when btn4 enables intake)
   bool  btn4;   // intake on/off switch
 } ControllerData;
@@ -104,6 +104,13 @@ void setRightMotor(int speed) {
 // Conveyor run state — used by loop() limit-switch guard.
 // 0 = stopped, +1 = forward (up), -1 = reverse (down)
 volatile int conveyorRun = 0;
+
+// One-click descent state. Set true on btn1 press edge; cleared on:
+//   - second btn1 press (cancel)
+//   - cherry limit pressed
+//   - manual UP override (btn2 held)
+//   - controller-timeout safety stop
+volatile bool autoDescending = false;
 
 static inline bool conveyorLimitPressed() {
   Serial.println(digitalRead(CONVEYOR_LIMIT_PIN));
@@ -176,11 +183,41 @@ void onDataReceived(const uint8_t *mac_addr, const uint8_t *data, int len) {
   setLeftMotor(leftSpeed);
   setRightMotor(rightSpeed);
 
-  // Conveyor: btn1 = forward, btn2 = backward.
-  // If both pressed at once, prefer forward and ignore backward (safer than oscillating).
+  // Conveyor mapping (swapped from prior version — buttons were inverted on the controller):
+  //   btn2 = manual UP (held, forward)
+  //   btn1 = one-click DOWN (toggle: press starts auto-descent, press again cancels,
+  //          cherry limit auto-stops). Edge-detected + debounced here in the receiver.
+  // The existing convention in this file treats `!incomingData.btnN` as "active".
+  bool upActive   = !incomingData.btn2;
+  bool downActive = !incomingData.btn1;
+
+  static bool          prevDownActive   = false;
+  static unsigned long lastDownEdgeMs   = 0;
+  const  unsigned long DOWN_DEBOUNCE_MS = 50;
+
+  unsigned long nowMs = millis();
+  if (downActive && !prevDownActive && (nowMs - lastDownEdgeMs > DOWN_DEBOUNCE_MS)) {
+    lastDownEdgeMs = nowMs;
+    autoDescending = !autoDescending;
+    Serial.printf("[DESCENT] Toggled %s\n", autoDescending ? "ON" : "OFF");
+  }
+  prevDownActive = downActive;
+
   int conveyorSpeed = 0;
-  if      (!incomingData.btn1) conveyorSpeed =  CONVEYOR_SPEED;
-  else if (!incomingData.btn2) conveyorSpeed = -CONVEYOR_SPEED;
+  if (upActive) {
+    // Manual UP overrides and cancels any auto-descent in progress.
+    if (autoDescending) Serial.println("[DESCENT] Cancelled by manual UP");
+    autoDescending = false;
+    conveyorSpeed  = CONVEYOR_SPEED;
+  } else if (autoDescending) {
+    if (conveyorLimitPressed()) {
+      Serial.println("[DESCENT] Limit reached — auto-stop");
+      autoDescending = false;
+      conveyorSpeed  = 0;
+    } else {
+      conveyorSpeed = -CONVEYOR_SPEED;
+    }
+  }
   setConveyorMotor(conveyorSpeed);
 
   // Intake: btn4 (switch) gates power; btn3 reverses direction while gated on.
@@ -264,6 +301,7 @@ void setup() {
 void loop() {
   // Kill motors if controller signal is lost
   if (lastReceiveTime > 0 && millis() - lastReceiveTime > RECEIVE_TIMEOUT) {
+    autoDescending = false;
     stopMotors();
   }
 
@@ -293,9 +331,11 @@ void loop() {
     lastLimitState = limitState;
   }
 
-  // Cherry-switch mid-stroke stop disabled.
+  // Mid-stroke safety: if descent is active and the cherry closes between packets,
+  // stop immediately rather than waiting for the next ESP-NOW packet (~20ms).
   if (conveyorRun < 0 && conveyorLimitPressed()) {
     Serial.println("[LIMIT] Down-motion stopped mid-stroke by cherry switch");
+    autoDescending = false;
     setConveyorMotor(0);
   }
 }
